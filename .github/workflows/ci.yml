@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  macos:
+    name: macOS (latest Xcode)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - run: swift --version
+
+      # The toolchain's swift-format, strict: findings are errors.
+      - name: Format / lint
+        run: swift format lint --strict -r Sources Tests Package.swift
+
+      - name: Build (release)
+        run: swift build -c release
+
+      # Complete concurrency checking is on in Package.swift; here also the Swift 6 language mode.
+      - name: Test (Swift 6 language mode, warnings as errors)
+        run: swift test -Xswiftc -swift-version -Xswiftc 6 -Xswiftc -warnings-as-errors
+
+      - name: Package manifest
+        run: swift package describe
+
+      - name: iOS / tvOS / watchOS builds
+        run: |
+          for platform in iOS tvOS watchOS; do
+            xcodebuild build -quiet -scheme OnlineSim -destination "generic/platform=${platform}" -derivedDataPath .build/xcode
+          done
+
+      # DocC reference as Swift Package Index builds it; any warning (broken symbol link, undocumented parameter) fails.
+      - name: DocC
+        run: |
+          xcodebuild docbuild -scheme OnlineSim -destination "generic/platform=macOS" -derivedDataPath .build/xcode 2>&1 | tee .build/docbuild.log
+          if grep -q "warning:" .build/docbuild.log; then echo "::error::DocC warnings"; exit 1; fi
+
+      # Every swift example of README.md and docs/content compiles against the package.
+      - name: Docs examples
+        run: python3 scripts/docs-examples.py
+
+      # A clean copy of the repo used through .package(path:) by an empty package that runs the README "Testing" example.
+      - name: Smoke from artifact
+        run: ./scripts/smoke-artifact.sh
+
+  linux:
+    name: Linux (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor (swift-tools-version 5.9) and the latest release.
+        image: ['swift:5.9-jammy', 'swift:latest']
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build -c release
+      - run: swift test
+      - name: Test (Swift 6 language mode)
+        if: matrix.image == 'swift:latest'
+        run: swift test -Xswiftc -swift-version -Xswiftc 6

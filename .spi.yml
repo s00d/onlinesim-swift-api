@@ -1,0 +1,14 @@
+version: 1
+builder:
+  configs:
+    # DocC reference of the library product; Swift Package Index builds it from the DocC comments.
+    - documentation_targets: [OnlineSim]
+    # Platforms Swift Package Index checks the package on (all supported by Package.swift and CI).
+    - platform: ios
+      scheme: OnlineSim
+    - platform: macos-spm
+    - platform: tvos
+      scheme: OnlineSim
+    - platform: watchos
+      scheme: OnlineSim
+    - platform: linux
