@@ -54,22 +54,37 @@ final class ClientTests: XCTestCase {
     // MARK: - response handling
 
     func testNoNumberMapsToNoNumber() async throws {
-        let (client, _) = fakeClient([.json(["response": "NO_NUMBER"]), .json(["response": "NO_NUMBER_FOR_FORWARD"])])
+        let (client, _) = fakeClient([.json(["response": "NO_NUMBER"]), .json(["response": "FORWARD_NOT_SUPPORTED"])])
         let error = await caught { try await client.numbers.get("google", country: 44) }
         XCTAssertEqual(
             error as? OnlineSimError,
             .noNumber(code: "NO_NUMBER", message: "No numbers available for this service right now"))
         XCTAssertEqual((error as? OnlineSimError)?.code, "NO_NUMBER")
+        // only NO_NUMBER is .noNumber
         let forward = await caught { try await client.numbers.get("google") }
-        guard case .noNumber(code: "NO_NUMBER_FOR_FORWARD", _)? = forward as? OnlineSimError else {
-            return XCTFail("\(String(describing: forward))")
-        }
+        XCTAssertEqual(
+            forward as? OnlineSimError,
+            .api(code: "FORWARD_NOT_SUPPORTED", message: "Number forwarding is no longer available"))
     }
 
     func testHTTP456WrongKeyIsAnAPIErrorNotTransport() async throws {
         let (client, _) = fakeClient([.json(["response": "ERROR_WRONG_KEY"], status: 456)])
         let error = await caught { try await client.user.balance() }
-        XCTAssertEqual(error as? OnlineSimError, .api(code: "ERROR_WRONG_KEY", message: "Wrong API key"))
+        XCTAssertEqual(error as? OnlineSimError, .api(code: "ERROR_WRONG_KEY", message: "Wrong or missing API key"))
+    }
+
+    func testHTTP429TryAgainLaterIsAnAPIErrorNotTransport() async throws {
+        let (client, _) = fakeClient([.json(["response": "TRY_AGAIN_LATER"], status: 429)])
+        let error = await caught { try await client.numbers.state() }
+        XCTAssertEqual(
+            error as? OnlineSimError,
+            .api(code: "TRY_AGAIN_LATER", message: "Rate limit exceeded or temporary error, try again later"))
+    }
+
+    func testMissingKeyHTTP200WrongKeyIsAnAPIError() async throws {
+        let (client, _) = fakeClient([.json(["response": "ERROR_WRONG_KEY"])], apiKey: nil)
+        let code = await apiCode { try await client.user.balance() }
+        XCTAssertEqual(code, "ERROR_WRONG_KEY")
     }
 
     func testPrefersServerMessageButNotWhenItEchoesTheCode() async throws {

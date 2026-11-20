@@ -106,7 +106,37 @@ final class WaitCodeTests: XCTestCase {
         XCTAssertEqual(calls, ["state code=1", "state code=1", "state code=1", "/api/setOperationOk.php"])
     }
 
-    func testRaisesAnyAPIErrorAtOnce() async throws {
+    func testRetriesTransientAPIErrorsUntilTheCodeArrives() async throws {
+        for code in ["TRY_AGAIN_LATER", "ERROR_UNDEFINED", "INTERVAL_CONCURRENT_REQUESTS_ERROR"] {
+            let fake = FakeClock()
+            let status = code == "TRY_AGAIN_LATER" ? 429 : 200
+            let (client, transport) = fakeClient([
+                .json(["response": .string(code)], status: status), op(msg: "42"), ok,
+            ])
+            let result = try await client.numbers.waitCode(7, clock: fake.clock)
+            XCTAssertEqual(result, "42")
+            XCTAssertEqual(fake.sleeps, [5])
+            let calls = await log(transport)
+            XCTAssertEqual(calls, ["state code=1", "state code=1", "/api/setOperationOk.php"])
+        }
+    }
+
+    func testARetryableAPIErrorStillEndsInTimeoutAtTheDeadline() async throws {
+        let fake = FakeClock()
+        let (client, _) = fakeClient(Array(repeating: .json(["response": "TRY_AGAIN_LATER"], status: 429), count: 3))
+        let error = await caught { try await client.numbers.waitCode(7, interval: 5, timeout: 10, clock: fake.clock) }
+        XCTAssertEqual(error as? OnlineSimError, .waitTimeout(tzid: 7, timeout: 10))
+        XCTAssertEqual(fake.sleeps, [5, 5])
+    }
+
+    func testAnOperationWithoutResponseKeepsPolling() async throws {
+        let fake = FakeClock()
+        let (client, _) = fakeClient([.json([["tzid": 7]]), op(msg: "77"), ok])
+        let code = try await client.numbers.waitCode(7, clock: fake.clock)
+        XCTAssertEqual(code, "77")
+    }
+
+    func testRaisesAnyOtherAPIErrorAtOnce() async throws {
         let fake = FakeClock()
         let (client, transport) = fakeClient([.json(["response": "ERROR_NO_OPERATIONS"])])
         let code = await apiCode { try await client.numbers.waitCode(7, clock: fake.clock) }

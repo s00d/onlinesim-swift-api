@@ -22,8 +22,8 @@ func list(country: Int? = nil, number: String? = nil, page: Int? = nil, count: I
 
 `FreeList`:
 
-- `countries`: `[FreeCountry]` — `country`, `countryText`, `countryOriginal`
-- `numbers`: `[String: FreeNumber]` — `country`, `countryOriginal`, `fullNumber`, `dataHumans`, `isArchive`; keyed by the short number
+- `countries`: `[FreeCountry]` — `country`, `countryText?`, `countryOriginal?` (`nil` when the server has none)
+- `numbers`: `[String: FreeNumber]` — `country`, `countryOriginal?`, `fullNumber`, `dataHumans`, `isArchive`; keyed by the short number
 - `messages`: `FreeMessages` — `page` (a `Paginator<FreeMessage>`), `data` (its items), `number`, `country`; `FreeMessage` has `id`, `text`, `inNumber`, `myNumber`, `code`, `createdAt`, `dataHumans`; `code` is `-` when no code was found
 
 ```swift

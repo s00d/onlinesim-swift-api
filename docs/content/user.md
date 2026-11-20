@@ -13,11 +13,11 @@ Balance in USD.
 func balance() async throws -> Balance
 ```
 
-`Balance`: `balance`, `zbalance`, `income?` (all `Double`). `balance` includes the sum frozen by numbers in progress (`zbalance`): available = `balance − zbalance`. `income` is the partner income. The server caches the answer for 60 s.
+`Balance`: `balance`, `zbalance`, `income?` (all `Double`). `balance` includes the sum frozen by numbers and unconfirmed rents in progress (`zbalance`, which may be negative): available = `balance − max(zbalance, 0)`. `income` is the partner income. The server caches the answer for 60 s.
 
 ```swift
 let balance = try await client.user.balance()
-let available = balance.balance - balance.zbalance
+let available = balance.balance - max(balance.zbalance, 0)
 ```
 
 Errors: `.api` `ERROR_WRONG_KEY`, `ACCOUNT_BLOCKED`, `API_ACCESS_DISABLED`, `API_ACCESS_IP`.
@@ -30,7 +30,7 @@ The account profile.
 func profile() async throws -> Profile
 ```
 
-`Profile`: `id`, `name?`, `username?`, `email?`, `locale?`, `currency?`, `numberCountry?`, `numberReject`, `webhookURL?`, `apiAccess?` (a `JSONValue`: `true` or a map of allowed IPs), …
+`Profile`: `id`, `name?`, `username?`, `email?`, `locale?`, `currency?`, `numberCountry?`, `numberReject`, `webhookURL?`, `number?` (`Int`), `country?` (`String`), `apiAccess?` (a `JSONValue`: `true` or a map of allowed IPs), …
 
 ```swift
 let profile = try await client.user.profile()
@@ -45,7 +45,7 @@ Top-up orders (paginated, newest first) and the available payment methods.
 func paymentHistory(page: Int = 1) async throws -> PaymentHistory
 ```
 
-`PaymentHistory`: `orders` (`Paginator<PaymentOrder>`), `paylist` (`[String: JSONValue]`), `domains?`, `forms?`, `currency?`, `buttons?`. `PaymentOrder.sum` stays a decimal string (`"89.00"`). `Paginator`: `currentPage`, `data`, `from?`, `to?`, `lastPage`, `perPage`, `total`, page URLs.
+`PaymentHistory`: `orders` (`Paginator<PaymentOrder>`), `paylist` (`[String: JSONValue]`), `domains?`, `forms?`, `currency?`, `buttons?`. `PaymentOrder.sum` stays a decimal string (`"89.00"`); `currency` and `formText` may be `nil`. `paylist` maps a group id to its payment methods; when the server sends a JSON array (ids 0, 1, 2…) its items are kept under the keys `"0"`, `"1"`, `"2"`…. `Paginator`: `currentPage`, `data`, `from?`, `to?`, `lastPage`, `perPage`, `total`, page URLs.
 
 ```swift
 let orders = try await client.user.paymentHistory().orders

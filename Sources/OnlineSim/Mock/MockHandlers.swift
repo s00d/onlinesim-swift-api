@@ -96,7 +96,8 @@ extension MockState {
         if req.query["number"] == nil { return ["response": 1, "tzid": .int(tzid)] }
         return [
             "response": 1, "tzid": .int(tzid), "number": .string(number), "country": .int(country),
-            "time": .int(operationTime), "service": .string(service),
+            "time": .int(operationTime), "service": .string(service), "title": .string(service),
+            "response_text": "Waiting for SMS", "guard_interval_remaining_seconds": .int(guardInterval),
         ]
     }
 
@@ -112,17 +113,19 @@ extension MockState {
 
     mutating func setOperationRevise(_ req: MockRequest) -> JSONValue {
         let tzid = req.int("tzid", 0)
-        // Always succeeds, even for unknown tzids, like the backend.
-        if var op = operations[tzid], op.status != .tzOverOk {
+        if tzid == 0 { return error("ERROR_NO_TZID") }
+        guard var op = operations[tzid] else { return error("ERROR_WRONG_TZID") }
+        if op.status != .tzOverOk {
             op.cursor = op.messages.count
             op.status = .tzNumWait
             operations[tzid] = op
         }
-        return ["response": 1, "tzid": .int(tzid)]
+        return ["tzid": .string(String(tzid)), "response": "1"]
     }
 
     mutating func setOperationOk(_ req: MockRequest) -> JSONValue {
         let tzid = req.int("tzid", 0)
+        if tzid == 0 { return error("ERROR_NO_TZID") }
         guard var op = operations[tzid], op.status != .tzOverOk else { return error("ERROR_WRONG_TZID") }
         let received = !op.messages.isEmpty
         if req.flag("ban") && received { return ["response": "0"] }
@@ -162,56 +165,67 @@ extension MockState {
 
     // MARK: - rent
 
-    private func rentItem(_ rent: MockRent, _ req: MockRequest) -> JSONValue {
+    /// A rent as the backend sends it. `sum` is a number in getRentNum/extendRentState and a 2-decimal string in
+    /// getRentState (`stringSum`). An unconfirmed rent (`status` 0) waits 20 minutes for its first SMS.
+    private func rentItem(_ rent: MockRent, _ req: MockRequest, stringSum: Bool = false) -> JSONValue {
         let tariff = rentTariffs[rent.country]
         let extendable = rent.isExtendable && tariff?.extend == 1
+        let confirmed = rent.status == 1
         let start = rent.tzid
+        let minutes = confirmed ? rent.days * 24 * 60 : rentFirstSmsMinutes
         var item: [String: JSONValue] = [
-            "status": 1,
+            "status": .int(rent.status),
             "extension": .int(rent.isExtendable ? 1 : 0),
             "messages": .array(
                 rent.messages.reversed().map {
                     [
                         "id": .int($0.id), "service": .string($0.service), "text": .string($0.text),
-                        "code": .string($0.code ?? ""), "created_at": .string($0.createdAt),
+                        // A notice about a prohibited sender carries the integer 0, other SMS a string ("" without
+                        // a code).
+                        "code": $0.service == notifySender ? 0 : .string($0.code ?? ""),
+                        "created_at": .string($0.createdAt),
                     ]
                 }),
             "webhook_url": webhookURL.map(JSONValue.string) ?? .null,
-            "sum": .string(decimal(toMills(rent.sum), digits: 2)),
+            "sum": stringSum ? .string(decimal(toMills(rent.sum), digits: 2)) : .double(rent.sum),
             "country": .int(rent.country),
             "start_time": .string(stamp(start)),
-            "stop_time": .string(stamp(start + rent.days * 86_400)),
+            "stop_time": .string(stamp(start + minutes * 60)),
             "checked_time": .string(stamp(start)),
             "number": .string(rent.number),
-            "days_autoextend": 0,
-            "rent": 1,
+            "days_autoextend": .int(rent.initialDays),
+            "rent": .int(rent.days),
             "tzid": .int(rent.tzid),
-            "time": .int(rent.days * 24 * 60),
-            "days": .int(rent.days),
-            "hours": .int(rent.days * 24),
+            "time": .int(minutes),
+            "days": .int(confirmed ? rent.days : 0),
+            "hours": .int(confirmed ? rent.days * 24 : 0),
             "extend": extendable ? daysObject(tariff?.days ?? [:], JSONValue.double) : [],
-            "checked": true,
-            "reload": nil,
+            "checked": .bool(confirmed),
+            "reload": rent.country == 7 ? 0 : nil,
             "day_extend": .double(extendable ? tariff?.days[1] ?? 0 : 0),
             "m_ext": false,
             "freeze": false,
         ]
-        if req.query["number"] != nil { item["time_seconds"] = .int(rent.days * 86_400) }
+        if req.query["number"] != nil {
+            item["time_seconds"] = .int(minutes * 60)
+            item["guard_interval_remaining_seconds"] = .int(!confirmed && rent.messages.isEmpty ? guardInterval : 0)
+        }
         return .object(item)
     }
 
     mutating func getRentNum(_ req: MockRequest) -> JSONValue {
         let country = req.int("country", 7)
-        guard let tariff = rentTariffs[country] else { return error("NO_COUNTRY") }
+        guard let tariff = rentTariffs[country] else { return error("UNDEFINED_COUNTRY") }
         let days = req.int("days", 1)
         guard let price = tariff.days[days] else { return error("UNDEFINED_DAYS") }
         if available < toMills(price) { return error("WARNING_LOW_BALANCE") }
         let tzid = nextID()
-        balance -= toMills(price)
+        // Reserved, not charged: the first SMS that is not `notify` confirms the rent and charges it.
+        frozen += toMills(price)
         // `extension` defaults to 1 on the server; `0` makes the rent non-extendable for good.
         let rent = MockRent(
-            tzid: tzid, country: country, number: Self.shortNumber(tzid), days: days, sum: price,
-            isExtendable: req.query["extension"] != "0", messages: [])
+            tzid: tzid, country: country, number: Self.shortNumber(tzid), days: days, initialDays: days, status: 0,
+            sum: price, isExtendable: req.query["extension"] != "0", messages: [])
         rents[tzid] = rent
         return ["response": 1, "item": rentItem(rent, req)]
     }
@@ -219,15 +233,15 @@ extension MockState {
     mutating func getRentState(_ req: MockRequest) -> JSONValue {
         let ids = req.query["tzid"] == nil ? rents.keys.sorted() : [req.int("tzid", -1)].filter { rents[$0] != nil }
         for id in ids { poll(id) }
-        return ["response": 1, "list": .array(ids.compactMap { rents[$0] }.map { rentItem($0, req) })]
+        return ["response": 1, "list": .array(ids.compactMap { rents[$0] }.map { rentItem($0, req, stringSum: true) })]
     }
 
     mutating func extendRentState(_ req: MockRequest) -> JSONValue {
-        guard var rent = rents[req.int("tzid", 0)] else { return error("ERROR_WRONG_TZID") }
-        guard let tariff = rentTariffs[rent.country], rent.isExtendable, tariff.extend == 1 else {
-            return error("TRY_AGAIN_LATER")
-        }
-        guard let price = tariff.days[req.int("days", 1)] else { return error("UNDEFINED_DAYS") }
+        // Every refusal is TRY_AGAIN_LATER, like the backend: unknown tzid, unconfirmed rent, not extendable,
+        // unknown days.
+        guard var rent = rents[req.int("tzid", 0)], let tariff = rentTariffs[rent.country], rent.status == 1,
+            rent.isExtendable, tariff.extend == 1, let price = tariff.days[req.int("days", 1)]
+        else { return error("TRY_AGAIN_LATER") }
         if available < toMills(price) { return error("WARNING_LOW_BALANCE") }
         balance -= toMills(price)
         rent.days += req.int("days", 1)
@@ -238,7 +252,15 @@ extension MockState {
 
     mutating func closeRentNum(_ req: MockRequest) -> JSONValue {
         let tzid = req.int("tzid", 0)
-        guard rents.removeValue(forKey: tzid) != nil else { return error("ERROR_WRONG_TZID") }
+        guard let rent = rents[tzid] else { return error("ERROR_NO_OPERATIONS") }
+        if rent.status == 0 {
+            // `guardInterval` stands in for the backend's first 120 s, during which a rent without any SMS stays open.
+            if rent.messages.isEmpty && guardInterval > 0 { return error("NO_COMPLETE_TZID") }
+            // Unconfirmed (no SMS or only `notify`): the reservation is released.
+            frozen -= toMills(rent.sum)
+        }
+        // A confirmed rent closes without a refund.
+        rents[tzid] = nil
         scheduled[tzid] = nil
         return ["response": "1"]
     }
@@ -294,7 +316,7 @@ extension MockState {
         if let url = profile["webhook_url"] {
             switch url {
             case .null: webhookURL = nil
-            case .string(let s) where isHTTPURL(s): webhookURL = s
+            case .string(let s) where isURL(s): webhookURL = s
             default: return ["response": ["webhook_url": ["The webhook url must be a valid URL."]]]
             }
         }
@@ -315,7 +337,8 @@ extension MockState {
         [
             "response": "1",
             "orders": paginate([], page: req.int("page", 1), perPage: 10, path: "getPaymentHistory.php"),
-            "paylist": [], "domains": [], "currency": ["USD": 1],
+            "paylist": [], "domains": ["onlinesim.io"], "forms": ["1": "Card"], "currency": ["USD": 1],
+            "buttons": ["USD": [5, 10, 20]],
         ]
     }
 
@@ -337,8 +360,11 @@ extension MockState {
         7: ("russia", "Russia", [("9001234567", [("Telegram", "Telegram code: 51423")])]),
     ]
 
+    /// `ignore` of getFreeList: a note about prohibited services and their ids.
+    private static let freeIgnore = "<p>Messages from these services are not shown:</p><p>1,2,3</p>"
+
     mutating func getFreeList(_ req: MockRequest) -> JSONValue {
-        let codes = Self.free.keys.sorted()
+        let codes = [44, 7]  // the backend lists 44 first
         let wanted = req.int("country", 44)
         let country = Self.free[wanted] == nil ? codes[0] : wanted
         let data = Self.free[country]!
@@ -354,13 +380,14 @@ extension MockState {
             [
                 "id": .int(i + 1), "text": .string(sms.1), "in_number": .string(sms.0),
                 "my_number": .string(selected.0),
-                "created_at": .string(stamp(i)), "data_humans": "1 day ago",
+                "created_at": .string(iso(i)), "data_humans": "1 day ago",
                 "code": .string(extractCode(sms.1) ?? "-"),
             ]
         }
         guard
             case .object(var page) = paginate(
-                messages, page: req.int("page", 1), perPage: req.int("count", 10), path: "getFreeList")
+                messages, page: max(1, req.int("page", 1)), perPage: min(500, max(10, req.int("count", 10))),
+                path: "getFreeList")
         else { return error("ERROR_PARAMS") }
         page["number"] = .string(selected.0)
         page["country"] = .int(country)
@@ -375,6 +402,8 @@ extension MockState {
                 }),
             "numbers": .object(numbers),
             "messages": .object(page),
+            "ignore": .string(Self.freeIgnore),
+            "content": nil,
         ]
     }
 
@@ -431,11 +460,14 @@ extension MockState {
         return "\(sign)\(value / 1000).\(String(repeating: "0", count: 3 - frac.count))\(frac)"
     }
 
-    private func isHTTPURL(_ value: String) -> Bool {
-        guard let url = URL(string: value), let scheme = url.scheme?.lowercased(), let host = url.host else {
-            return false
-        }
-        return (scheme == "http" || scheme == "https") && !host.isEmpty
+    /// The backend accepts any `scheme://…` URL.
+    private func isURL(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://\S+$"#, options: .regularExpression) != nil
+    }
+
+    /// `YYYY-MM-DDTHH:MM:SS.000000Z`, the ISO-8601 form getFreeList sends.
+    private func iso(_ seconds: Int) -> String {
+        stamp(seconds).replacingOccurrences(of: " ", with: "T") + ".000000Z"
     }
 }
 

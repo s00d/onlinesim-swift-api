@@ -15,17 +15,18 @@ public struct WebhookPayload: Sendable, Hashable, Codable {
     public var operationID: Int?
     public var userID: Int?
     public var countryCode: Int?
-    /// The number, e.g. `+79001234567`.
+    /// Numbers: `+` and the full number (`+79001234567`), or `hidden`. Rent: the full number in digits without `+`
+    /// (`79001234567`).
     public var number: String?
     /// Sender of the SMS, e.g. `VK`.
     public var sender: String?
     /// Full SMS text.
     public var message: String?
-    /// Code extracted from the SMS.
+    /// Code extracted from the SMS; empty when none was found.
     public var code: String?
-    /// Start of the operation.
+    /// Numbers: when the operation was ordered. Rent: when the SMS arrived. `YYYY-MM-DD HH:MM:SS`.
     public var timeStart: String?
-    /// Time left.
+    /// Time left: seconds for numbers, minutes for rent.
     public var timeLeft: Int?
 
     enum CodingKeys: String, CodingKey {

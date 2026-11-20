@@ -31,6 +31,10 @@ public struct WaitClock: Sendable {
 }
 
 extension NumbersAPI {
+    /// API error codes ``waitCode(_:interval:timeout:keepOpen:fullMessage:since:clock:)`` retries: the rate limit
+    /// (HTTP 429), a transient server error, too many concurrent requests.
+    static let retryable: Set<String> = ["TRY_AGAIN_LATER", "ERROR_UNDEFINED", "INTERVAL_CONCURRENT_REQUESTS_ERROR"]
+
     /// Polls the operation until an SMS code arrives, then closes it (or calls ``next(_:)`` with `keepOpen`) and
     /// returns the code.
     ///
@@ -43,8 +47,9 @@ extension NumbersAPI {
     ///   - since: Ignore this value (the previous code when waiting for the next one).
     ///   - clock: Sleep and clock; inject a fake one in tests.
     ///
-    /// A transient ``OnlineSimError/transport(message:status:body:)`` is retried until the timeout; any API error is
-    /// thrown at once. A finished operation (`TZ_OVER_OK`, `ERROR_NO_ITEMS`) without a new code throws
+    /// Transient errors are retried until the timeout: ``OnlineSimError/transport(message:status:body:)``, and
+    /// ``OnlineSimError/api(code:message:)`` `TRY_AGAIN_LATER` (the HTTP 429 rate limit), `ERROR_UNDEFINED` and
+    /// `INTERVAL_CONCURRENT_REQUESTS_ERROR`. Any other API error is thrown at once. A finished operation (`TZ_OVER_OK`, `ERROR_NO_ITEMS`) without a new code throws
     /// ``OnlineSimError/api(code:message:)`` with that state as the code; running out of `timeout` throws
     /// ``OnlineSimError/waitTimeout(tzid:timeout:)``.
     public func waitCode(
@@ -63,6 +68,8 @@ extension NumbersAPI {
                 operation = try await stateOne(tzid, messageToCode: !fullMessage)
             } catch OnlineSimError.transport {
                 // transient: retried until the deadline
+            } catch OnlineSimError.api(let code, _) where Self.retryable.contains(code) {
+                // rate limit or a transient server error: retried until the deadline
             }
 
             if let operation {
@@ -70,8 +77,8 @@ extension NumbersAPI {
                     if keepOpen { try await next(tzid) } else { try await close(tzid) }
                     return code
                 }
-                if operation.response == .tzOverOk || operation.response == .errorNoItems {
-                    throw OnlineSimError.api(operation.response.rawValue)
+                if let state = operation.response, state == .tzOverOk || state == .errorNoItems {
+                    throw OnlineSimError.api(state.rawValue)
                 }
             }
 

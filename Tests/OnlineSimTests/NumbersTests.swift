@@ -132,6 +132,31 @@ final class NumbersTests: XCTestCase {
         XCTAssertEqual(call.query, ["tzid": "1520", "ban": "1"])
     }
 
+    func testBanAfterSmsZeroIsAnAPIErrorWithAReadableMessage() async throws {
+        let (client, _) = fakeClient([.json(["response": "0"])])
+        let error = await caught { try await client.numbers.ban(1520) }
+        XCTAssertEqual(
+            error as? OnlineSimError, .api(code: "0", message: "Ban not applied: the operation already has an SMS"))
+    }
+
+    func testNextAcceptsStringTzidAnswerWrongTzidForAForeignOne() async throws {
+        let (client, _) = fakeClient([
+            .json(["tzid": "1520", "response": "1"]), .json(["response": "ERROR_WRONG_TZID"]),
+        ])
+        try await client.numbers.next(1520)
+        let code = await apiCode { try await client.numbers.next(1) }
+        XCTAssertEqual(code, "ERROR_WRONG_TZID")
+    }
+
+    func testStateOneAcceptsAnOperationWithoutResponse() async throws {
+        let (client, _) = fakeClient([
+            .json([["tzid": 5, "country": 7, "service": "vkcom", "sum": 0.5, "time": 900, "form": "index"]])
+        ])
+        let op = try await client.numbers.stateOne(5)
+        XCTAssertEqual(op.tzid, 5)
+        XCTAssertNil(op.response)
+    }
+
     func testCloseSurfacesNoCompleteTzid() async throws {
         let (client, _) = fakeClient([.json(["response": "NO_COMPLETE_TZID"])])
         let code = await apiCode { try await client.numbers.close(1) }

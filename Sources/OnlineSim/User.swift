@@ -4,7 +4,8 @@ import Foundation
 public struct UserAPI: Sendable {
     let requester: Requester
 
-    /// Balance in USD. ``Balance/balance`` includes the frozen ``Balance/zbalance``: available = balance − zbalance.
+    /// Balance in USD. ``Balance/balance`` includes the frozen ``Balance/zbalance``:
+    /// available = balance − max(zbalance, 0).
     ///
     /// Throws ``OnlineSimError/api(code:message:)`` `ERROR_WRONG_KEY`, `ACCOUNT_BLOCKED`, `API_ACCESS_DISABLED`, …
     public func balance() async throws -> Balance {
@@ -42,9 +43,9 @@ public struct UserAPI: Sendable {
 
 /// Balance in USD.
 public struct Balance: Sendable, Hashable, Codable {
-    /// Total balance. Includes ``zbalance``: available = balance − zbalance.
+    /// Total balance. Includes ``zbalance``: available = balance − max(zbalance, 0).
     public var balance: Double
-    /// Sum frozen by numbers in progress.
+    /// Sum frozen by numbers and unconfirmed rents in progress; may be negative.
     public var zbalance: Double
     /// Partner income.
     public var income: Double?
@@ -82,8 +83,10 @@ public struct Profile: Sendable, Hashable, Codable {
     /// Rejected number prefixes (the server sends a list or a map; the values are kept).
     public var numberReject: [String]
     public var webhookURL: String?
-    public var number: String?
-    public var country: Int?
+    /// The profile's phone number.
+    public var number: Int?
+    /// The profile's country.
+    public var country: String?
     public var numberRegion: Int?
     public var isAPI: Bool?
     public var active: String?
@@ -133,8 +136,8 @@ public struct Profile: Sendable, Hashable, Codable {
         default: numberReject = []
         }
         webhookURL = try? c.decodeIfPresent(String.self, forKey: .webhookURL)
-        number = try? c.decodeIfPresent(String.self, forKey: .number)
-        country = c.lossyInt(.country)
+        number = c.lossyInt(.number)
+        country = c.lossyString(.country)
         numberRegion = c.lossyInt(.numberRegion)
         isAPI = try? c.decodeIfPresent(Bool.self, forKey: .isAPI)
         active = try? c.decodeIfPresent(String.self, forKey: .active)
@@ -155,7 +158,7 @@ public struct PaymentOrder: Sendable, Hashable, Codable {
     public var id: Int
     /// Decimal string, e.g. `"89.00"`.
     public var sum: String
-    public var currency: String
+    public var currency: String?
     public var stat: Int
     public var formText: String?
     public var statusText: String?
@@ -167,12 +170,24 @@ public struct PaymentOrder: Sendable, Hashable, Codable {
         case statusText = "status_text"
         case createdAt = "created_at"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.lossyInt(.id) ?? c.decode(Int.self, forKey: .id)
+        sum = c.lossyString(.sum) ?? ""
+        currency = c.lossyString(.currency)
+        stat = c.lossyInt(.stat) ?? 0
+        formText = c.lossyString(.formText)
+        statusText = c.lossyString(.statusText)
+        createdAt = c.lossyString(.createdAt) ?? ""
+    }
 }
 
 /// Top-up orders and payment methods.
 public struct PaymentHistory: Sendable, Hashable, Codable {
     public var orders: Paginator<PaymentOrder>
-    /// Payment methods by list id.
+    /// Payment methods by group id. When the server sends a JSON array (ids 0, 1, 2…), its items are kept under
+    /// the keys `"0"`, `"1"`, `"2"`…
     public var paylist: [String: JSONValue]
     public var domains: [String]?
     public var forms: [String: String]?
@@ -184,7 +199,12 @@ public struct PaymentHistory: Sendable, Hashable, Codable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         orders = try c.decode(Paginator<PaymentOrder>.self, forKey: .orders)
-        paylist = try c.phpMap(.paylist)
+        switch try c.decodeIfPresent(JSONValue.self, forKey: .paylist) {
+        case .object(let map)?: paylist = map
+        case .array(let list)?:
+            paylist = Dictionary(uniqueKeysWithValues: list.enumerated().map { (String($0.offset), $0.element) })
+        default: paylist = [:]
+        }
         domains = try? c.decodeIfPresent([String].self, forKey: .domains)
         forms = try? c.decodeIfPresent([String: String].self, forKey: .forms)
         currency = try? c.decodeIfPresent([String: Double].self, forKey: .currency)
