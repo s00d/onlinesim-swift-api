@@ -3,18 +3,43 @@ import XCTest
 
 @testable import OnlineSim
 
+/// A raw request to the mock: HTTP status and the JSON body as sent on the wire.
+private func wire(_ mock: MockOnlineSim, _ path: String, key: String? = "mock-key") async throws -> (Int, JSONValue) {
+    let request = TransportRequest(
+        method: "GET", url: URL(string: "https://x.test/api/\(path)")!,
+        headers: key.map { ["Authorization": "Bearer \($0)"] } ?? [:], body: nil, timeout: 1)
+    let response = try await mock.send(request)
+    return (response.status, try JSONDecoder().decode(JSONValue.self, from: response.body))
+}
+
+extension JSONValue {
+    /// The first element when this is an array.
+    fileprivate var firstItem: JSONValue? {
+        if case .array(let list) = self { return list.first }
+        return nil
+    }
+}
+
 /// MockOnlineSim through the real client: every endpoint, every control helper.
 final class MockAuthTests: XCTestCase {
-    func testWrongOrMissingKeyAnswers456WrongKey() async throws {
+    func testWrongKeyIs456MissingKeyIs200BothWrongKey() async throws {
         let mock = MockOnlineSim()
         for key in ["nope", ""] {
             let error = await caught { try await mock.client(apiKey: key).user.balance() }
-            XCTAssertEqual(error as? OnlineSimError, .api(code: "ERROR_WRONG_KEY", message: "Wrong API key"))
+            XCTAssertEqual(error as? OnlineSimError, .api(code: "ERROR_WRONG_KEY", message: "Wrong or missing API key"))
         }
+        let missing = try await wire(mock, "getBalance.php", key: nil)
+        XCTAssertEqual(missing.0, 200)
+        XCTAssertEqual(missing.1, ["response": "ERROR_WRONG_KEY"])
+        let wrong = try await wire(mock, "getBalance.php", key: "nope")
+        XCTAssertEqual(wrong.0, 456)
     }
 
-    func testTariffsAndFreeNumbersNeedNoKey() async throws {
-        let client = MockOnlineSim().client(apiKey: "")
+    func testTariffsAndFreeNumbersNeedNoKeyButASentWrongKeyIs456() async throws {
+        let mock = MockOnlineSim()
+        let wrongFree = await apiCode { try await mock.client(apiKey: "nope").free.list() }
+        XCTAssertEqual(wrongFree, "ERROR_WRONG_KEY")
+        let client = mock.client(apiKey: "")
         let uk = try await client.numbers.tariffsOne(country: 44)
         XCTAssertEqual(uk.code, 44)
         let ru = try await client.rent.tariffsOne(country: 7)
@@ -58,12 +83,18 @@ final class MockNumbersTests: XCTestCase {
         let first = try await client.numbers.get("google", country: 44)
         XCTAssertEqual(first, 1)
         let order = try await client.numbers.getWithNumber("vkcom")
-        XCTAssertEqual(order, NumberOrder(tzid: 2, number: "+7900000002", country: 7, time: 1200, service: "vkcom"))
-        XCTAssertEqual(mock.requests.map { $0.query["number"] }, [nil, "1"])
+        XCTAssertEqual(
+            order,
+            NumberOrder(
+                tzid: 2, number: "+7900000002", country: 7, time: 1200, service: "vkcom", title: "vkcom",
+                guardIntervalRemainingSeconds: 0))
+        let raw = try await wire(mock, "getNum.php?service=google&country=44&number=1")
+        XCTAssertEqual(raw.1["response_text"], "Waiting for SMS")
+        XCTAssertEqual(mock.requests.map { $0.query["number"] }, [nil, "1", "1"])
         let balance = try await client.user.balance()
-        XCTAssertEqual(balance, Balance(balance: 100, zbalance: 0.7, income: 0))
-        XCTAssertEqual(mock.operations().map(\.number), ["+44900000001", "+7900000002"])
-        XCTAssertEqual(mock.operations().map(\.status), [.tzNumWait, .tzNumWait])
+        XCTAssertEqual(balance, Balance(balance: 100, zbalance: 0.9, income: 0))
+        XCTAssertEqual(mock.operations().map(\.number), ["+44900000001", "+7900000002", "+44900000003"])
+        XCTAssertEqual(mock.operations().map(\.status), [.tzNumWait, .tzNumWait, .tzNumWait])
     }
 
     func testGetErrors() async throws {
@@ -136,7 +167,21 @@ final class MockNumbersTests: XCTestCase {
             op.msg,
             .list([OperationSms(service: "telegram", msg: "Welcome!"), OperationSms(service: "telegram", msg: "98765")])
         )
-        try await client.numbers.next(424_242)  // always succeeds, like the backend
+        XCTAssertEqual(mock.requests.filter { $0.path == "setOperationRevise.php" }.count, 1)
+    }
+
+    func testNextAnswersStringTzidUnknownWrongTzidZeroNoTzid() async throws {
+        let mock = MockOnlineSim()
+        let client = mock.client()
+        let tzid = try await client.numbers.get("google", country: 44)
+        let raw = try await wire(mock, "setOperationRevise.php?tzid=\(tzid)")
+        XCTAssertEqual(raw.1, ["tzid": .string(String(tzid)), "response": "1"])
+        var code = await apiCode { try await client.numbers.next(424_242) }
+        XCTAssertEqual(code, "ERROR_WRONG_TZID")
+        code = await apiCode { try await client.numbers.next(0) }
+        XCTAssertEqual(code, "ERROR_NO_TZID")
+        code = await apiCode { try await client.numbers.close(0) }
+        XCTAssertEqual(code, "ERROR_NO_TZID")
     }
 
     func testCloseSpendsOrRefundsBanAfterSmsAnswersZero() async throws {
@@ -219,52 +264,101 @@ final class MockNumbersTests: XCTestCase {
 }
 
 final class MockRentTests: XCTestCase {
-    func testGetStateExtendClose() async throws {
+    func testGetReservesFirstSmsConfirmsAndChargesExtendClose() async throws {
         let mock = MockOnlineSim(balance: 10)
         let client = mock.client()
         let rent = try await client.rent.get(country: 7, days: 3)
         XCTAssertEqual(rent.tzid, 1)
         XCTAssertEqual(rent.number, "900000001")
+        XCTAssertEqual([rent.status, rent.days, rent.time, rent.timeSeconds], [0, 0, 20, 1200])
+        XCTAssertEqual(rent.checked, false)
         XCTAssertEqual(rent.sum, 2.5)
-        XCTAssertEqual(rent.days, 3)
-        XCTAssertEqual(rent.time, 3 * 1440)
-        XCTAssertEqual(rent.timeSeconds, 3 * 86400)
-        XCTAssertEqual(rent.extension, 1)
+        XCTAssertEqual([rent.rent, rent.daysAutoextend, rent.extension], [3, 3, 1])
+        XCTAssertEqual(rent.guardIntervalRemainingSeconds, 0)
         XCTAssertEqual(rent.messages, [])
         XCTAssertEqual(rent.extend, [1: 1, 3: 2.5, 7: 5])
-        XCTAssertEqual(mock.balance(), 7.5)
+        // reserved: the total balance stays, the price is frozen
+        XCTAssertEqual(mock.balance(), 10)
+        var balance = try await client.user.balance()
+        XCTAssertEqual([balance.balance, balance.zbalance], [10, 2.5])
+        var code = await apiCode { try await client.rent.extend(rent.tzid) }
+        XCTAssertEqual(code, "TRY_AGAIN_LATER")  // not confirmed yet
 
         try mock.addSms(rent.tzid, "Bank: 777 888", service: "bank")
         try mock.addSms(rent.tzid, "no code here")
         let state = try await client.rent.stateOne(rent.tzid)
+        XCTAssertEqual([state.status, state.days, state.time, state.timeSeconds], [1, 3, 3 * 1440, 3 * 86400])
+        XCTAssertEqual(state.checked, true)
         XCTAssertEqual(state.messages.map(\.service), ["other", "bank"])  // newest first
         XCTAssertEqual(state.messages.map(\.code), ["", "777888"])
+        XCTAssertEqual(mock.balance(), 7.5)
+        balance = try await client.user.balance()
+        XCTAssertEqual([balance.balance, balance.zbalance], [7.5, 0])
 
         let extended = try await client.rent.extend(rent.tzid, days: 1)
-        XCTAssertEqual(extended.days, 4)
+        XCTAssertEqual([extended.days, extended.rent, extended.daysAutoextend], [4, 4, 3])
         XCTAssertEqual(extended.sum, 3.5)
         XCTAssertEqual(mock.balance(), 6.5)
+        code = await apiCode { try await client.rent.extend(rent.tzid, days: 2) }
+        XCTAssertEqual(code, "TRY_AGAIN_LATER")  // unknown period
+        code = await apiCode { try await client.rent.extend(999) }
+        XCTAssertEqual(code, "TRY_AGAIN_LATER")  // unknown tzid
 
         let fixed = try await client.rent.get(country: 7, days: 1, extension: false)
-        XCTAssertEqual(fixed.extension, 0)
-        XCTAssertEqual(fixed.extend, [:])
-        var code = await apiCode { try await client.rent.extend(fixed.tzid) }
+        try mock.addSms(fixed.tzid, "1234")
+        let fixedState = try await client.rent.stateOne(fixed.tzid)
+        XCTAssertEqual(fixedState.extension, 0)
+        XCTAssertEqual(fixedState.extend, [:])
+        code = await apiCode { try await client.rent.extend(fixed.tzid) }
         XCTAssertEqual(code, "TRY_AGAIN_LATER")
         let all = try await client.rent.state()
         XCTAssertEqual(all.map(\.tzid), [rent.tzid, fixed.tzid])
 
-        try await client.rent.close(fixed.tzid)
+        try await client.rent.close(fixed.tzid)  // confirmed: no refund
+        XCTAssertEqual(mock.balance(), 5.5)
         XCTAssertEqual(mock.rents().map(\.tzid), [rent.tzid])
         code = await apiCode { try await client.rent.stateOne(fixed.tzid) }
         XCTAssertEqual(code, "ERROR_NO_OPERATIONS")
         code = await apiCode { try await client.rent.close(fixed.tzid) }
-        XCTAssertEqual(code, "ERROR_WRONG_TZID")
+        XCTAssertEqual(code, "ERROR_NO_OPERATIONS")
+    }
+
+    func testSumIsANumberInGetRentNumAndADecimalStringInGetRentState() async throws {
+        let mock = MockOnlineSim()
+        let got = try await wire(mock, "rent/getRentNum.php?days=3")
+        XCTAssertEqual(got.1["item"]?["sum"], .double(2.5))
+        let listed = try await wire(mock, "rent/getRentState.php")
+        XCTAssertEqual(listed.1["list"]?.firstItem?["sum"], "2.50")
+    }
+
+    func testUnconfirmedRentCloseReleasesNotifyHasCodeZeroGuardInterval() async throws {
+        let mock = MockOnlineSim(balance: 10, guardInterval: 120)
+        let client = mock.client()
+        let rent = try await client.rent.get(country: 7, days: 3)
+        XCTAssertEqual(rent.guardIntervalRemainingSeconds, 120)
+        var code = await apiCode { try await client.rent.close(rent.tzid) }
+        XCTAssertEqual(code, "NO_COMPLETE_TZID")
+        try mock.addSms(rent.tzid, "Messages from this sender are not accepted", service: "notify")
+        let state = try await client.rent.stateOne(rent.tzid)
+        XCTAssertEqual(state.status, 0)
+        XCTAssertEqual(state.checked, false)
+        XCTAssertEqual(state.guardIntervalRemainingSeconds, 0)
+        XCTAssertEqual(state.messages.first?.service, "notify")
+        XCTAssertEqual(state.messages.first?.code, "0")
+        let wireState = try await wire(mock, "rent/getRentState.php")
+        XCTAssertEqual(wireState.1["list"]?.firstItem?["messages"]?.firstItem?["code"], .int(0))
+        try await client.rent.close(rent.tzid)
+        XCTAssertEqual(mock.balance(), 10)  // released, nothing charged
+        let balance = try await client.user.balance()
+        XCTAssertEqual([balance.balance, balance.zbalance], [10, 0])
+        code = await apiCode { try await client.rent.close(rent.tzid) }
+        XCTAssertEqual(code, "ERROR_NO_OPERATIONS")
     }
 
     func testRentErrors() async throws {
         let client = MockOnlineSim(balance: 1.5).client()
         var code = await apiCode { try await client.rent.get(country: 44) }
-        XCTAssertEqual(code, "NO_COUNTRY")
+        XCTAssertEqual(code, "UNDEFINED_COUNTRY")
         code = await apiCode { try await client.rent.get(country: 7, days: 2) }
         XCTAssertEqual(code, "UNDEFINED_DAYS")
         code = await apiCode { try await client.rent.get(country: 7, days: 3) }
@@ -279,6 +373,7 @@ final class MockRentTests: XCTestCase {
         let before = try await client.rent.stateOne(tzid)
         XCTAssertEqual(before.messages, [])
         let after = try await client.rent.state()
+        XCTAssertEqual(after.first?.status, 1)
         XCTAssertEqual(after.first?.messages.first?.code, "6060")
         XCTAssertEqual(after.first?.messages.first?.service, "other")
         let tariffs = try await client.rent.tariffs()
@@ -303,9 +398,10 @@ final class MockUserFreeTests: XCTestCase {
         XCTAssertEqual(profile.id, 1)
         XCTAssertEqual(profile.apikey, "secret")
         XCTAssertNil(profile.webhookURL)
-        let error = await caught { try await client.user.setWebhookURL("ftp://x") }
+        let error = await caught { try await client.user.setWebhookURL("not a url") }
         XCTAssertEqual(
             error as? OnlineSimError, .api(code: "VALIDATION_ERROR", message: "The webhook url must be a valid URL."))
+        try await client.user.setWebhookURL("ftp://x")  // any scheme://… URL
         try await client.user.setWebhookURL("https://example.com/hook")
         let last = try XCTUnwrap(mock.requests.last)
         XCTAssertEqual(last.method, "POST")
@@ -318,11 +414,21 @@ final class MockUserFreeTests: XCTestCase {
         try mock.addSms(tzid, "code 1234")
         let rent = try await client.rent.get()
         try mock.addSms(rent.tzid, "code 5678")
+        try mock.addSms(rent.tzid, "no code")
         let logs = try await client.user.webhookLogs()
-        XCTAssertEqual([logs.total, logs.currentPage, logs.perPage], [2, 1, 10])
-        XCTAssertEqual(logs.data.map(\.type), [.rentSms, .receivingSms])
-        XCTAssertEqual(logs.data.map(\.params.operationID), [rent.tzid, tzid])
-        XCTAssertEqual(logs.data.map(\.params.code), ["5678", "1234"])
+        XCTAssertEqual([logs.total, logs.currentPage, logs.perPage], [3, 1, 10])
+        XCTAssertEqual(logs.data.map(\.type), [.rentSms, .rentSms, .receivingSms])
+        XCTAssertEqual(logs.data.map(\.params.operationID), [rent.tzid, rent.tzid, tzid])
+        XCTAssertEqual(logs.data.map(\.params.code), ["", "5678", "1234"])
+        // activation: +number, seconds left, order time; rent: digits without +, minutes left, SMS time
+        let activation = logs.data[2].params
+        XCTAssertEqual(activation.number, "+44900000001")
+        XCTAssertEqual(activation.timeLeft, 1200)
+        XCTAssertEqual(activation.timeStart, "2026-01-01 00:00:01")
+        let rentSms = logs.data[1].params
+        XCTAssertEqual(rentSms.number, "7900000002")
+        XCTAssertEqual(rentSms.timeLeft, 1440)
+        XCTAssertEqual(rentSms.timeStart, "2026-01-01 00:00:03")
 
         try await client.user.clearWebhookURL()
         profile = try await client.user.profile()
@@ -337,6 +443,9 @@ final class MockUserFreeTests: XCTestCase {
         XCTAssertEqual(balance, Balance(balance: 3, zbalance: 1.2, income: 0))
         let history = try await client.user.paymentHistory()
         XCTAssertEqual(history.paylist, [:])
+        XCTAssertEqual(history.forms, ["1": "Card"])
+        XCTAssertEqual(history.buttons, ["USD": [5, 10, 20]])
+        XCTAssertEqual(history.domains, ["onlinesim.io"])
         XCTAssertEqual(history.orders.data, [])
         XCTAssertEqual(history.orders.total, 0)
         XCTAssertEqual(history.orders.currentPage, 1)
@@ -345,12 +454,23 @@ final class MockUserFreeTests: XCTestCase {
     func testFreeList() async throws {
         let client = MockOnlineSim().client()
         let uk = try await client.free.list()
-        XCTAssertEqual(uk.countries.map(\.country), [7, 44])
+        XCTAssertEqual(uk.countries.map(\.country), [44, 7])
         XCTAssertEqual(Array(uk.numbers.keys), ["7459608320"])
         XCTAssertEqual(uk.messages.number, "7459608320")
         XCTAssertEqual(uk.messages.country, 44)
         XCTAssertEqual(uk.messages.page.total, 2)
+        XCTAssertEqual(uk.messages.page.perPage, 10)
         XCTAssertEqual(uk.messages.data.first?.code, "195895")
+        XCTAssertEqual(uk.messages.data.first?.createdAt, "2026-01-01T00:00:00.000000Z")
+        let small = try await client.free.list(count: 0)
+        XCTAssertEqual(small.messages.page.perPage, 10)  // clamped to 10..500
+        let big = try await client.free.list(count: 9999)
+        XCTAssertEqual(big.messages.page.perPage, 500)
+        let unknown = try await client.free.list(country: 999)
+        XCTAssertEqual(unknown.messages.country, 44)  // unknown → the first country
+        let raw = try await wire(MockOnlineSim(), "getFreeList", key: nil)
+        XCTAssertEqual(raw.1["content"], .null)
+        XCTAssertNotNil(raw.1["ignore"]?.stringValue)
         let ru = try await client.free.list(country: 7)
         XCTAssertEqual(ru.messages.data.first?.code, "51423")
         XCTAssertEqual(ru.messages.data.first?.myNumber, "9001234567")

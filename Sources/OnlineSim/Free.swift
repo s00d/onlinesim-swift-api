@@ -44,20 +44,30 @@ public struct FreeList: Sendable, Hashable, Codable {
 /// A country with free numbers.
 public struct FreeCountry: Sendable, Hashable, Codable {
     public var country: Int
-    public var countryText: String
-    public var countryOriginal: String
+    /// Display name; `nil` when the server has none.
+    public var countryText: String?
+    /// Slug, e.g. `united_kingdom`; `nil` when the server has none.
+    public var countryOriginal: String?
 
     enum CodingKeys: String, CodingKey {
         case country
         case countryText = "country_text"
         case countryOriginal = "country_original"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        country = try c.lossyInt(.country) ?? c.decode(Int.self, forKey: .country)
+        countryText = c.lossyString(.countryText)
+        countryOriginal = c.lossyString(.countryOriginal)
+    }
 }
 
 /// A free number.
 public struct FreeNumber: Sendable, Hashable, Codable {
     public var country: Int
-    public var countryOriginal: String
+    /// Country slug; `nil` when the server has none.
+    public var countryOriginal: String?
     /// With the country code, without `+`.
     public var fullNumber: String
     public var dataHumans: String
@@ -69,6 +79,15 @@ public struct FreeNumber: Sendable, Hashable, Codable {
         case fullNumber = "full_number"
         case dataHumans = "data_humans"
         case isArchive = "is_archive"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        country = c.lossyInt(.country) ?? 0
+        countryOriginal = c.lossyString(.countryOriginal)
+        fullNumber = c.lossyString(.fullNumber) ?? ""
+        dataHumans = c.lossyString(.dataHumans) ?? ""
+        isArchive = (try? c.decodeIfPresent(Bool.self, forKey: .isArchive)) ?? false
     }
 }
 

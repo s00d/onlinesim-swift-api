@@ -143,7 +143,8 @@ struct Requester: Sendable {
     }
 
     /// Response handling shared by every call. The JSON body is checked before the HTTP status:
-    /// a wrong key is HTTP 456 with `{"response":"ERROR_WRONG_KEY"}`, an ``OnlineSimError/api(code:message:)``.
+    /// a wrong key is HTTP 456 with `{"response":"ERROR_WRONG_KEY"}`, the rate limit HTTP 429 with
+    /// `{"response":"TRY_AGAIN_LATER"}`; both are ``OnlineSimError/api(code:message:)``.
     static func check(_ data: Data, status: Int) throws {
         guard let json = try? JSONDecoder().decode(JSONValue.self, from: data) else {
             throw OnlineSimError.transport(

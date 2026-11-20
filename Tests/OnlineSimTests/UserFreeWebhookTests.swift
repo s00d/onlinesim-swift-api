@@ -31,6 +31,40 @@ final class UserTests: XCTestCase {
         XCTAssertEqual(profile.numberCountry, 1)
     }
 
+    func testProfileDecodesNumberAsIntAndCountryAsString() async throws {
+        let (client, _) = fakeClient([
+            .json(["response": "1", "profile": ["id": 1, "number": 79_001_234_567, "country": "RU"]]),
+            .json(["response": "1", "profile": ["id": 1, "number": nil, "country": nil]]),
+        ])
+        let profile = try await client.user.profile()
+        XCTAssertEqual(profile.number, 79_001_234_567)
+        XCTAssertEqual(profile.country, "RU")
+        let empty = try await client.user.profile()
+        XCTAssertNil(empty.number)
+        XCTAssertNil(empty.country)
+    }
+
+    func testPaymentHistoryKeepsAnArrayPaylistAndNullableOrderFields() async throws {
+        guard case .object(var body) = try JSONDecoder().decode(JSONValue.self, from: try fixture("getPaymentHistory")),
+            case .object(var orders)? = body["orders"]
+        else { throw URLError(.cannotDecodeContentData) }
+        orders["data"] = [
+            [
+                "id": 1, "sum": "10.00", "currency": nil, "form_text": nil, "stat": 0,
+                "created_at": "2026-06-14 09:12:12",
+            ]
+        ]
+        body["orders"] = .object(orders)
+        body["paylist"] = [["id": 0, "name": "Card"], ["id": 1, "name": "Crypto"]]
+        let (client, _) = fakeClient([.json(.object(body))])
+        let history = try await client.user.paymentHistory()
+        XCTAssertEqual(history.paylist, ["0": ["id": 0, "name": "Card"], "1": ["id": 1, "name": "Crypto"]])
+        let order = try XCTUnwrap(history.orders.data.first)
+        XCTAssertNil(order.currency)
+        XCTAssertNil(order.formText)
+        XCTAssertEqual(order.sum, "10.00")
+    }
+
     func testPaymentHistoryNormalisesEmptyPaylist() async throws {
         let (client, transport) = fakeClient([.data(try fixture("getPaymentHistory"))])
         let history = try await client.user.paymentHistory(page: 2)
@@ -102,6 +136,26 @@ final class FreeTests: XCTestCase {
         XCTAssertEqual(list.messages.country, 44)
         XCTAssertEqual(list.messages.page.total, 426)
         XCTAssertEqual(list.countries.map(\.country), [44, 380])
+    }
+
+    func testListAcceptsNullCountryTexts() async throws {
+        let (client, _) = fakeClient([
+            .json([
+                "response": 1, "countries": [["country": 999, "country_text": nil, "country_original": nil]],
+                "numbers": [
+                    "123": [
+                        "country": 999, "country_original": nil, "full_number": "999123", "data_humans": "now",
+                        "is_archive": false,
+                    ]
+                ],
+                "messages": ["data": []],
+            ])
+        ])
+        let list = try await client.free.list()
+        XCTAssertEqual(list.countries.first?.country, 999)
+        XCTAssertNil(list.countries.first?.countryText)
+        XCTAssertNil(list.countries.first?.countryOriginal)
+        XCTAssertNil(list.numbers["123"]?.countryOriginal)
     }
 
     func testListNormalisesEmptyNumbers() async throws {

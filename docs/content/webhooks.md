@@ -40,9 +40,9 @@ func handleOnlineSimHook(body: Data) throws {
 | `operationID` | `operation_id` | `Int?` | `tzid` of the operation or rent. |
 | `userID` | `user_id` | `Int?` | Account id. |
 | `countryCode` | `country_code` | `Int?` | Country code of the number. |
-| `number` | `number` | `String?` | The number, e.g. `+79001234567`. |
+| `number` | `number` | `String?` | Numbers: `+` and the full number (`+79001234567`), or `hidden`. Rent: the full number in digits without `+` (`79001234567`). |
 | `sender` | `sender` | `String?` | Sender of the SMS, e.g. `VK`. |
 | `message` | `message` | `String?` | Full SMS text. |
-| `code` | `code` | `String?` | Code extracted from the SMS. |
-| `timeStart` | `time_start` | `String?` | Start of the operation. |
-| `timeLeft` | `time_left` | `Int?` | Time left. |
+| `code` | `code` | `String?` | Code extracted from the SMS; `""` when none was found. |
+| `timeStart` | `time_start` | `String?` | Numbers: when the operation was ordered. Rent: when the SMS arrived. `YYYY-MM-DD HH:MM:SS`. |
+| `timeLeft` | `time_left` | `Int?` | Time left: seconds for numbers, minutes for rent. |

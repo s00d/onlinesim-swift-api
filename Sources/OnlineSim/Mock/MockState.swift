@@ -25,6 +25,8 @@ public struct MockSms: Sendable, Hashable {
     public internal(set) var text: String
     /// Code extracted from `text` (first run of 4–8 digits), `nil` when there is none.
     public internal(set) var code: String?
+    /// Seconds after the mock epoch when it arrived.
+    var at: Int = 0
 }
 
 /// A number operation as the mock stores it.
@@ -58,8 +60,13 @@ public struct MockRent: Sendable, Hashable {
     public internal(set) var country: Int
     /// Number without the country code, as the backend sends it for rents.
     public internal(set) var number: String
+    /// Total rent days: the initial period plus extensions.
     public internal(set) var days: Int
-    /// Total paid, USD.
+    /// The initial period (`days` of getRentNum).
+    public internal(set) var initialDays: Int
+    /// `0`: reserved, waiting for the first SMS; `1`: confirmed by an SMS that is not `notify`, price charged.
+    public internal(set) var status: Int
+    /// Total cost incl. extensions, USD. Frozen while ``status`` is `0`.
     public internal(set) var sum: Double
     /// Created with `extension: true`.
     public internal(set) var isExtendable: Bool
@@ -103,6 +110,10 @@ struct ScheduledSms {
 }
 
 let mockUserID = 1
+/// Sender of a rent SMS from a prohibited sender: it gets the integer `code` `0` and does not confirm the rent.
+let notifySender = "notify"
+/// Minutes an unconfirmed rent waits for its first SMS (`stop_time` = start + this).
+let rentFirstSmsMinutes = 20
 /// Seconds an operation stays open, as reported in `time`. The mock has no clock, so it never runs down.
 let operationTime = 1200
 
@@ -170,7 +181,7 @@ struct MockState {
 
     /// Total balance incl. the frozen part, mills.
     var balance = 0
-    /// Frozen by open operations, mills.
+    /// Frozen by open operations and unconfirmed rents, mills.
     var frozen = 0
     var operations: [Int: MockOperation] = [:]
     var rents: [Int: MockRent] = [:]
@@ -225,20 +236,33 @@ struct MockState {
     mutating func deliver(_ tzid: Int, _ text: String, service: String?) -> Bool {
         let code = extractCode(text)
         if var op = operations[tzid], op.status != .tzOverOk {
-            let sms = MockSms(service: service ?? op.service, text: text, code: code)
+            let sms = MockSms(service: service ?? op.service, text: text, code: code, at: seq)
             op.messages.append(sms)
             op.status = .tzNumAnswer
             operations[tzid] = op
-            webhook(.receivingSms, tzid: tzid, country: op.country, number: op.number, sms: sms)
+            // Activation: `+<digits>`, seconds left, the order time.
+            webhook(
+                .receivingSms, tzid: tzid, country: op.country, number: op.number, sms: sms,
+                timeLeft: operationTime, timeStart: stamp(op.tzid))
             return true
         }
         if var rent = rents[tzid] {
-            let sms = MockSms(service: service ?? "other", text: text, code: code)
             let id = nextID()
+            let sms = MockSms(service: service ?? "other", text: text, code: code, at: id)
             rent.messages.append(
                 MockRentSms(id: id, service: sms.service, text: text, code: code, createdAt: stamp(id)))
+            if rent.status == 0 && sms.service != notifySender {
+                // The first real SMS confirms the rent: the reservation is charged.
+                let cost = toMills(rent.sum)
+                frozen -= cost
+                balance -= cost
+                rent.status = 1
+            }
             rents[tzid] = rent
-            webhook(.rentSms, tzid: tzid, country: rent.country, number: rent.number, sms: sms)
+            // Rent: full number in digits without `+`, minutes left, the SMS time.
+            webhook(
+                .rentSms, tzid: tzid, country: rent.country, number: "\(rent.country)\(rent.number)", sms: sms,
+                timeLeft: rent.status == 1 ? rent.days * 24 * 60 : rentFirstSmsMinutes, timeStart: stamp(id))
             return true
         }
         return false
@@ -263,9 +287,11 @@ struct MockState {
     }
 
     /// No HTTP call: the mock only records what the backend would have sent.
-    private mutating func webhook(_ type: WebhookType, tzid: Int, country: Int, number: String, sms: MockSms) {
+    private mutating func webhook(
+        _ type: WebhookType, tzid: Int, country: Int, number: String, sms: MockSms, timeLeft: Int, timeStart: String
+    ) {
         guard let url = webhookURL else { return }
-        let time = JSONValue.string(stamp(seq))
+        let time = JSONValue.string(stamp(sms.at))
         webhookLogs.append([
             "id": .int(webhookLogs.count + 1),
             "user_id": .int(mockUserID),
@@ -279,9 +305,9 @@ struct MockState {
                 "number": .string(number),
                 "sender": .string(sms.service),
                 "message": .string(sms.text),
-                "code": sms.code.map(JSONValue.string) ?? .null,
-                "time_start": time,
-                "time_left": .int(operationTime),
+                "code": .string(sms.code ?? ""),
+                "time_start": .string(timeStart),
+                "time_left": .int(timeLeft),
             ],
             "status": "success",
             "error": nil,

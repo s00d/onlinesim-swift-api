@@ -77,12 +77,12 @@ func state(messageToCode: Bool = true, orderBy: OrderBy = .asc, msgList: Bool = 
 | `orderBy` | `OrderBy` | `.asc` | Order of operations (`.asc`, `.desc`). |
 | `msgList` | `Bool` | `false` | `msg` is a list of all SMS. |
 
-`NumberOperation`: `tzid`, `response`, `number?`, `service?`, `country?`, `sum?`, `time?`, `msg?`, `guardIntervalRemainingSeconds?`, …
-`response` is an `OperationStatus`: `.tzInPool` (number being assigned), `.tzNumWait` (waiting for SMS), `.tzNumAnswer` (SMS arrived), `.tzOverOk` (finished), `.errorNoItems` (failed). `msg` is an `OperationMessage` — `.text(String)` by default, `.list([OperationSms])` with `msgList` — and `nil` until the first SMS. The server caches answers for a few seconds.
+`NumberOperation`: `tzid`, `response?`, `number?`, `service?`, `country?`, `sum?`, `time?`, `msg?`, `guardIntervalRemainingSeconds?`, …
+`response` is an `OperationStatus` (`nil` when the server sends none: no number could be issued): `.tzInPool` (number being assigned), `.tzNumWait` (waiting for SMS), `.tzNumAnswer` (SMS arrived), `.tzOverOk` (finished), `.errorNoItems` (failed). `msg` is an `OperationMessage` — `.text(String)` by default, `.list([OperationSms])` with `msgList` — and `nil` until the first SMS. The server caches answers for a few seconds.
 
 ```swift
 for op in try await client.numbers.state(orderBy: .desc) {
-    print(op.tzid, op.response, op.msg?.text ?? "-")
+    print(op.tzid, op.response?.rawValue ?? "-", op.msg?.text ?? "-")
 }
 ```
 
@@ -126,7 +126,7 @@ func waitCode(
 | `since` | `String?` | `nil` | Ignore this value (the previous code). |
 | `clock` | `WaitClock` | `.system` | `now` and `sleep`; inject a fake one in tests. |
 
-A transient `.transport` error is retried until the timeout; any API error is thrown at once. Task cancellation stops the wait.
+Transient errors are retried until the timeout: `.transport`, and `.api` `TRY_AGAIN_LATER` (the HTTP 429 rate limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR`. Any other API error is thrown at once. Task cancellation stops the wait.
 
 ```swift
 let first = try await client.numbers.waitCode(tzid, keepOpen: true)
@@ -156,6 +156,8 @@ func next(_ tzid: Int) async throws
 try await client.numbers.next(tzid)
 ```
 
+Errors: `.api` `ERROR_WRONG_TZID` (not an operation of your account), `ERROR_NO_TZID`.
+
 ## close
 
 Finish the operation. An operation without SMS can be closed only after its guard interval (`guardIntervalRemainingSeconds`); every attempt locks the tzid for 5 s.
@@ -182,7 +184,7 @@ func ban(_ tzid: Int) async throws
 try await client.numbers.ban(tzid)
 ```
 
-Errors: as `close`.
+Errors: as `close`; `.api` with code `"0"` when the operation already has an SMS — nothing is changed then.
 
 ## tariffs
 

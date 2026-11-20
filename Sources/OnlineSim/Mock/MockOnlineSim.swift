@@ -40,8 +40,8 @@ public final class MockOnlineSim: Transport, Sendable {
     ///   - balance: Starting balance, USD.
     ///   - prices: Number prices; replace the defaults. Also feed ``NumbersAPI/tariffs()``.
     ///   - rentTariffs: Rent tariffs; replace the defaults. `extend: 0` makes rents of a country non-extendable.
-    ///   - guardInterval: Guard interval of new operations, seconds. `> 0`: an operation without SMS cannot be
-    ///     closed (`NO_COMPLETE_TZID`).
+    ///   - guardInterval: Guard interval of new operations and rents, seconds. `> 0`: an operation without SMS, or
+    ///     an unconfirmed rent without any SMS, cannot be closed (`NO_COMPLETE_TZID`).
     public init(
         apiKey: String = "mock-key",
         balance: Double = 100,
@@ -62,7 +62,8 @@ public final class MockOnlineSim: Transport, Sendable {
     /// A normal client wired to the mock.
     ///
     /// - Parameters:
-    ///   - apiKey: `nil`: the mock's key. Pass another one to test a wrong key, `""` for none.
+    ///   - apiKey: `nil`: the mock's key. Pass another one to test a wrong key (HTTP 456), `""` for none (HTTP 200
+    ///     `ERROR_WRONG_KEY`).
     ///   - lang: Language of server texts (`lang` query parameter).
     ///   - devID: Partner developer id (`dev_id` query parameter), sent only when set.
     ///   - timeout: Per-request timeout, seconds.
@@ -158,8 +159,12 @@ public final class MockOnlineSim: Transport, Sendable {
                 }
             }
             guard MockState.routes(req.path) else { return html(404, "Not Found") }
-            if !MockState.publicPaths.contains(req.path) && authorization != "Bearer \(state.apiKey)" {
+            // A wrong key is HTTP 456 (public endpoints check a sent key too); no key at all is HTTP 200.
+            if let authorization, authorization != "Bearer \(state.apiKey)" {
                 return json(["response": "ERROR_WRONG_KEY"], status: 456)
+            }
+            if authorization == nil && !MockState.publicPaths.contains(req.path) {
+                return json(["response": "ERROR_WRONG_KEY"])
             }
             return json(state.handle(req) ?? .null)
         }

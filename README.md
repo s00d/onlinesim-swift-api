@@ -20,7 +20,7 @@ import OnlineSim
 let client = OnlineSimClient(apiKey: "your-api-key")
 
 let balance = try await client.user.balance()
-print("available: \(balance.balance - balance.zbalance) USD")
+print("available: \(balance.balance - max(balance.zbalance, 0)) USD")
 
 let order = try await client.numbers.getWithNumber("google", country: 44)
 print("enter \(order.number) in the app")

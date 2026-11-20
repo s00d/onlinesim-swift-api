@@ -71,7 +71,7 @@ final class IntegrationTests: XCTestCase {
         let ids = try await client.numbers.state().map(\.tzid)
         XCTAssertTrue(ids.contains(tzid) && ids.contains(order.tzid))
         let one = try await client.numbers.stateOne(tzid)
-        XCTAssertTrue(one.response.rawValue.hasPrefix("TZ_"))
+        XCTAssertTrue(one.response?.rawValue.hasPrefix("TZ_") ?? false)
 
         // The test driver answers NO_NUMBER to any reject list: proves `reject` is sent.
         let rejected = await caught { try await client.numbers.get(service, country: country, reject: ["4470"]) }

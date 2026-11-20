@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.1
+
+Aligned with the regenerated backend API spec.
+
+### Fixed
+
+- Decoding: `NumberOperation.response` is optional (absent when no number could be issued; a getState item without it no longer fails to decode, which made `waitCode` poll until its timeout); `PaymentOrder.currency`/`formText`, `FreeCountry.countryText`/`countryOriginal` and `FreeNumber.countryOriginal` accept `null` (`String?`); `Profile.number` is `Int?` and `Profile.country` is `String?` (they were swapped). The changed models decode leniently.
+- `RentSms.code`: the integer `0` of a `notify` SMS is normalised to `"0"`; rent `sum` is read from a number or a decimal string.
+- `user.paymentHistory()` no longer drops `paylist` when the server sends it as a JSON array (ids 0, 1, 2…): its items are kept under the keys `"0"`, `"1"`, `"2"`…
+- `numbers.waitCode` retries `.api` `TRY_AGAIN_LATER` (HTTP 429 rate limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR` until its timeout instead of throwing at once.
+- Error messages: `"0"` (ban not applied, the operation already has an SMS), `ACCOUNT_CLEANED`, `USER_NOT_ACTIVATED`, `ERROR_UNDEFINED`, `FORWARD_NOT_SUPPORTED` added; `ERROR_NO_KEY`, `NO_NUMBER_FOR_FORWARD`, `ACCOUNT_IDENTIFICATION_REQUIRED`, `API_DISABLED` (no longer sent) removed; `.noNumber` only for `NO_NUMBER`; `ERROR_WRONG_KEY` reads "Wrong or missing API key".
+- `MockOnlineSim` follows the backend: `setOperationRevise` answers `{"tzid":"N","response":"1"}` and `ERROR_WRONG_TZID` / `ERROR_NO_TZID`; `setOperationOk` tzid `0` → `ERROR_NO_TZID`; a missing key is HTTP 200 `ERROR_WRONG_KEY` (456 only for a wrong key, also on public endpoints); `getNum` with `number` adds `title`, `response_text`, `guard_interval_remaining_seconds`. Rent: `getRentNum` reserves the price (`status` 0) and the first non-`notify` SMS confirms and charges it, unknown country → `UNDEFINED_COUNTRY`, `sum` a number in getRentNum/extendRentState and a string in getRentState, `guard_interval_remaining_seconds` with `number`; `extendRentState` refusals are all `TRY_AGAIN_LATER`; `closeRentNum` unknown tzid → `ERROR_NO_OPERATIONS`, releases the reservation of an unconfirmed rent. `MockRent` gains `status` and `initialDays`. Webhook-log params: `code` `""` without a code, rent `number` in full digits, rent `time_left` in minutes, `time_start` per type. `profile.php` accepts any `scheme://…` URL. `getPaymentHistory` adds `forms`/`buttons`/`domains`; `getFreeList` lists 44 first, clamps `count` to 10..500, sends ISO-8601 `created_at` and `ignore`/`content`.
+- Docs: rent reservation and `sum`, available = balance − max(zbalance, 0), `ban` answer `"0"`, `next` errors, webhook `number`/`timeLeft`/`timeStart`, the `waitCode` retry policy, the mock's behaviour.
+
 ## 1.0.0
 
 First release of the Swift SDK for the OnlineSim API, on the same contract as the other OnlineSim SDKs (the JS SDK 2.1.0 is the reference). SwiftPM package `OnlineSim`, distributed by git tags.

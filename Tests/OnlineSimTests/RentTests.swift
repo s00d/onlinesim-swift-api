@@ -110,4 +110,30 @@ final class RentTests: XCTestCase {
         let code = await apiCode { try await client.rent.close(1) }
         XCTAssertEqual(code, "NO_CLOSE_RENT_US")
     }
+
+    func testDecodesSumAsNumberOrStringAndNotifyCodeZero() async throws {
+        guard case .object(var item) = try items()[0] else { throw URLError(.cannotDecodeContentData) }
+        item["status"] = 0
+        item["checked"] = false
+        item["sum"] = 1.5
+        item["messages"] = [
+            [
+                "id": 2, "service": "notify", "text": "Messages from this sender are not accepted", "code": 0,
+                "created_at": "2026-11-19 10:01:12",
+            ],
+            ["id": 1, "service": "Google", "text": "G-070051", "code": "070051", "created_at": "2026-11-19 10:01:00"],
+        ]
+        var listed = item
+        listed["sum"] = "2.40"
+        let (client, _) = fakeClient([
+            .json(["response": 1, "item": .object(item)]), .json(["response": 1, "list": [.object(listed)]]),
+        ])
+        let rent = try await client.rent.get(country: 7, days: 3)
+        XCTAssertEqual(rent.status, 0)
+        XCTAssertEqual(rent.checked, false)
+        XCTAssertEqual(rent.sum, 1.5)
+        XCTAssertEqual(rent.messages.map(\.code), ["0", "070051"])
+        let state = try await client.rent.stateOne(rent.tzid)
+        XCTAssertEqual(state.sum, 2.4)
+    }
 }

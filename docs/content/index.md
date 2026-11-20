@@ -29,7 +29,7 @@ import OnlineSim
 let client = OnlineSimClient(apiKey: "your-api-key")
 
 let balance = try await client.user.balance()
-print("available: \(balance.balance - balance.zbalance) USD")
+print("available: \(balance.balance - max(balance.zbalance, 0)) USD")
 
 let order = try await client.numbers.getWithNumber("google", country: 44)
 print("enter \(order.number) in the app")
@@ -62,7 +62,7 @@ let client = OnlineSimClient(
 
 `OnlineSimClient` is an immutable `Sendable` struct: create it once and share it between tasks. Sections: [`client.numbers`](/numbers), [`client.rent`](/rent), [`client.user`](/user), [`client.free`](/free). Webhook bodies are parsed by the standalone [`parseWebhook`](/webhooks).
 
-Models are `Codable`, `Sendable` and `Hashable` structs with Swift names (`webhookURL`, `guardIntervalRemainingSeconds`). Server quirks are normalised: money that arrives as a decimal string (`balance`, rent `sum`) becomes a `Double`, maps that arrive as an empty PHP array `[]` become empty dictionaries, and country codes and rent days are `Int` keys.
+Models are `Codable`, `Sendable` and `Hashable` structs with Swift names (`webhookURL`, `guardIntervalRemainingSeconds`). Server quirks are normalised: money that arrives as a decimal string (`balance`, rent `sum` in `rent.state`) becomes a `Double`, maps that arrive as an empty PHP array `[]` become empty dictionaries (`paymentHistory().paylist` sent as a JSON array keeps its items under the keys `"0"`, `"1"`…), and country codes and rent days are `Int` keys.
 
 ### Transport
 
@@ -94,8 +94,8 @@ Every error is an `OnlineSimError`:
 
 | Case | When |
 |---|---|
-| `.api(code:message:)` | The API answered with an error code (also a wrong key, HTTP 456). |
-| `.noNumber(code:message:)` | `NO_NUMBER` / `NO_NUMBER_FOR_FORWARD`: no number right now. An API error too. |
+| `.api(code:message:)` | The API answered with an error code (also a wrong key, HTTP 456, and the rate limit, HTTP 429 `TRY_AGAIN_LATER`). |
+| `.noNumber(code:message:)` | `NO_NUMBER`: no number right now. An API error too. |
 | `.transport(message:status:body:)` | Network error, request timeout, or a body that is not the expected JSON. `status` is `nil` without a response, `body` holds the first 500 characters. |
 | `.waitTimeout(tzid:timeout:)` | `waitCode` got no code within its `timeout`. |
 | `.invalidPayload(message:)` | `parseWebhook` got input that is not a JSON object. |

@@ -74,6 +74,9 @@ public struct NumbersAPI: Sendable {
     }
 
     /// Switches the operation to its next SMS and keeps it open.
+    ///
+    /// Throws ``OnlineSimError/api(code:message:)`` `ERROR_WRONG_TZID` (not an operation of your account),
+    /// `ERROR_NO_TZID`.
     public func next(_ tzid: Int) async throws {
         try await requester.send("setOperationRevise.php", query: [("tzid", String(tzid))])
     }
@@ -87,6 +90,9 @@ public struct NumbersAPI: Sendable {
     }
 
     /// Finishes the operation and reports the number as bad (only before any SMS arrived).
+    ///
+    /// Throws as ``close(_:)``; ``OnlineSimError/api(code:message:)`` with code `"0"` when the operation already has
+    /// an SMS — nothing is changed then.
     public func ban(_ tzid: Int) async throws {
         try await requester.send("setOperationOk.php", query: [("tzid", String(tzid)), ("ban", "1")])
     }
@@ -186,8 +192,9 @@ public enum OperationMessage: Sendable, Hashable, Codable {
 /// Named `NumberOperation`, not `Operation`, to stay clear of Foundation's `Operation`.
 public struct NumberOperation: Sendable, Hashable, Codable {
     public var tzid: Int
-    /// The state: ``OperationStatus/tzNumWait``, ``OperationStatus/tzNumAnswer``, …
-    public var response: OperationStatus
+    /// The state: ``OperationStatus/tzNumWait``, ``OperationStatus/tzNumAnswer``, …; `nil` when the server sends
+    /// none (no number could be issued).
+    public var response: OperationStatus?
     /// Full number with `+`.
     public var number: String?
     public var service: String?
@@ -215,7 +222,7 @@ public struct NumberOperation: Sendable, Hashable, Codable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         tzid = try c.lossyInt(.tzid) ?? c.decode(Int.self, forKey: .tzid)
-        response = try c.decode(OperationStatus.self, forKey: .response)
+        response = (try? c.decodeIfPresent(OperationStatus.self, forKey: .response)) ?? nil
         number = try c.decodeIfPresent(String.self, forKey: .number)
         service = try c.decodeIfPresent(String.self, forKey: .service)
         country = c.lossyInt(.country)
